@@ -1,9 +1,26 @@
 """Entry point — interactive REPL for the Bookly support agent."""
+import logging
+
 from agent import SupportAgent
+from context import CustomerContext
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# CLI sessions run as authenticated for demo purposes
+_CLI_CTX = CustomerContext(
+    session_id="cli-session",
+    authenticated=True,
+    customer_id="CUST-001",
+)
 
 
 def main() -> None:
-    agent = SupportAgent()
+    agent = SupportAgent(ctx=_CLI_CTX)
+    logger.info("CLI session started (authenticated, customer_id=CUST-001)")
 
     print("=" * 56)
     print("  Bookly Customer Support  |  Aria (AI Agent)")

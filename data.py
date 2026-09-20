@@ -68,9 +68,23 @@ ORDERS = {
     },
 }
 
-# In-memory write logs — simulate backend mutations
-REFUNDS_INITIATED: dict = {}
-CONFIRMATIONS_RECORDED: dict = {}  # order_id → customer_email
+# In-memory write logs — simulate backend mutations.
+# Prototype only: data is lost on restart.
+
+# Keyed by order_id → full result dict (stored on success for idempotency)
+REFUNDS_INITIATED: dict[str, dict] = {}
+
+# Keyed by confirmation token → pending refund details
+# Stores: session_id, customer_id, order_id, amount, payment_destination, expires_at, consumed
+PENDING_REFUNDS: dict[str, dict] = {}
+
+# Maps customer_id → list of order_ids for authenticated lookups
+CUSTOMERS: dict[str, list[str]] = {
+    "CUST-001": ["BK-10042"],
+    "CUST-002": ["BK-9871"],
+    "CUST-003": ["BK-8823"],
+    "CUST-004": ["BK-10105"],
+}
 
 POLICIES = {
     "shipping": """Shipping Policy

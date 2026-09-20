@@ -17,6 +17,11 @@ _load_dotenv()
 
 
 class _Settings:
+    # Class-level constants — not read from environment
+    MAX_HTTP_RETRIES: int = 2
+    MAX_MESSAGE_LENGTH: int = 4000
+    MAX_CONVERSATION_TURNS: int = 50
+
     @property
     def api_key(self) -> str:
         key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -29,7 +34,7 @@ class _Settings:
 
     @property
     def model(self) -> str:
-        return os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+        return os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 
     @property
     def max_tokens(self) -> int:
