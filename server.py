@@ -12,7 +12,7 @@ import json
 import pathlib
 import secrets
 
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -31,6 +31,10 @@ _contexts: dict[str, CustomerContext] = {}
 _UI = pathlib.Path(__file__).parent / "static" / "index.html"
 
 
+class SessionRequest(BaseModel):
+    mode: str = "guest"
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str
@@ -42,17 +46,20 @@ def index() -> str:
 
 
 @app.post("/session")
-def create_session() -> dict:
+def create_session(req: SessionRequest = Body(default=SessionRequest())) -> dict:
     """Create a new server-generated session.  Clients must call this before /chat."""
     session_id = secrets.token_urlsafe(16)
-    ctx = CustomerContext(session_id=session_id, authenticated=False)
+    if req.mode == "sarah_demo":
+        ctx = CustomerContext(session_id=session_id, authenticated=True, customer_id="CUST-004")
+    else:
+        ctx = CustomerContext(session_id=session_id, authenticated=False)
     _contexts[session_id] = ctx
     _sessions[session_id] = SupportAgent(ctx=ctx)
-    return {"session_id": session_id}
+    return {"session_id": session_id, "mode": req.mode}
 
 
-@app.post("/chat")
-def chat(req: ChatRequest) -> JSONResponse | dict:
+@app.post("/chat", response_model=None)
+def chat(req: ChatRequest):
     # Validate message length
     if len(req.message) > settings.MAX_MESSAGE_LENGTH:
         return JSONResponse(
@@ -77,15 +84,28 @@ def chat(req: ChatRequest) -> JSONResponse | dict:
         )
 
     reply = agent.reply(req.message)
+
+    # Check for a newly created pending refund for this session
+    pending_refund_info = None
+    for token, data in PENDING_REFUNDS.items():
+        if data["session_id"] == req.session_id and not data.get("consumed"):
+            pending_refund_info = {
+                "amount": data["amount"],
+                "payment_destination": data["payment_destination"],
+                "order_id": data["order_id"],
+            }
+            break
+
     return {
         "reply": reply,
         "tool_calls": agent.last_tool_calls,
         "session_id": req.session_id,
+        "pending_refund": pending_refund_info,
     }
 
 
-@app.post("/confirm/{session_id}")
-def confirm_refund(session_id: str) -> JSONResponse | dict:
+@app.post("/confirm/{session_id}", response_model=None)
+def confirm_refund(session_id: str):
     """Application-controlled confirmation endpoint.
 
     Looks up the pending refund for the session and calls initiate_refund with
@@ -111,7 +131,22 @@ def confirm_refund(session_id: str) -> JSONResponse | dict:
         )
 
     result = json.loads(initiate_refund(pending_data["order_id"], ctx, token))
-    return result
+
+    # Build a customer-friendly response
+    if result.get("success") or result.get("status") == "already_initiated":
+        amount = result.get("amount", pending_data.get("amount"))
+        refund_id = result.get("refund_id", "")
+        return {
+            "success": True,
+            "message": (
+                f"Your refund of ${amount:.2f} has been submitted. "
+                f"You'll receive confirmation within 5–7 business days."
+            ),
+            "refund_id": refund_id,
+            "amount": amount,
+        }
+
+    return JSONResponse(status_code=400, content=result)
 
 
 @app.delete("/session/{session_id}")

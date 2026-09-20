@@ -466,3 +466,77 @@ class TestConversationClientLoop:
                 client.chat("hi", [], lambda n, i: "")
 
         assert mp.call_count == total_attempts
+
+
+# ── Endpoint tests ────────────────────────────────────────────────────────────
+
+
+class TestEndpoints:
+    """FastAPI endpoint integration tests — no API key, no network access."""
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+        import server
+        with mock.patch.object(server.SupportAgent, "reply", return_value="I can help with that."):
+            with TestClient(server.app) as c:
+                yield c
+
+    def test_session_creation_returns_session_id(self, client):
+        res = client.post("/session", json={"mode": "guest"})
+        assert res.status_code == 200
+        assert len(res.json()["session_id"]) > 0
+
+    def test_sarah_demo_session_is_authenticated(self, client):
+        from server import _contexts
+        res = client.post("/session", json={"mode": "sarah_demo"})
+        sid = res.json()["session_id"]
+        assert _contexts[sid].authenticated is True
+        assert _contexts[sid].customer_id == "CUST-004"
+
+    def test_chat_rejects_unknown_session(self, client):
+        res = client.post("/chat", json={"message": "hello", "session_id": "fake-id"})
+        assert res.status_code == 404
+
+    def test_chat_rejects_oversized_message(self, client):
+        sid = client.post("/session", json={"mode": "guest"}).json()["session_id"]
+        res = client.post("/chat", json={"message": "x" * 4001, "session_id": sid})
+        assert res.status_code == 400
+
+    def test_chat_returns_reply_and_pending_refund_field(self, client):
+        sid = client.post("/session", json={"mode": "guest"}).json()["session_id"]
+        res = client.post("/chat", json={"message": "hello", "session_id": sid})
+        assert res.status_code == 200
+        data = res.json()
+        assert "reply" in data
+        assert "pending_refund" in data
+        assert data["pending_refund"] is None
+
+    def test_confirm_returns_404_without_pending_refund(self, client):
+        sid = client.post("/session", json={"mode": "sarah_demo"}).json()["session_id"]
+        assert client.post(f"/confirm/{sid}").status_code == 404
+
+    def test_confirm_succeeds_with_pending_refund(self, client):
+        import datetime
+        from server import _contexts
+        sid = client.post("/session", json={"mode": "sarah_demo"}).json()["session_id"]
+        PENDING_REFUNDS["tok-1"] = {
+            "session_id": sid,
+            "customer_id": "CUST-004",
+            "order_id": "BK-10105",
+            "amount": 15.99,
+            "payment_destination": "original payment method",
+            "expires_at": (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat(),
+            "consumed": False,
+        }
+        res = client.post(f"/confirm/{sid}")
+        assert res.status_code == 200
+        assert res.json()["success"] is True
+        assert "BK-10105" in REFUNDS_INITIATED
+
+    def test_session_deletion_removes_session(self, client):
+        from server import _sessions
+        sid = client.post("/session", json={"mode": "guest"}).json()["session_id"]
+        assert sid in _sessions
+        client.delete(f"/session/{sid}")
+        assert sid not in _sessions

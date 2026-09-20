@@ -7,11 +7,17 @@
 
 ---
 
+## Demonstration scope
+
+Two journeys are supported: a guest customer tracking an order by ID and email, and Sarah Lee (an authenticated demo customer) reporting a damaged delivery, reviewing a prepared refund, and confirming it through the UI. All customer data is synthetic and held in memory.
+
+---
+
 ## Quick start
 
 **CLI**
 ```bash
-git clone <repo-url> && cd bookly-agent
+git clone https://github.com/ired2307/bookly-agent.git && cd bookly-agent
 pip install -r requirements.txt
 cp .env.example .env          # add ANTHROPIC_API_KEY
 python cli.py
@@ -22,6 +28,8 @@ python cli.py
 python -m uvicorn server:app --reload
 # open http://127.0.0.1:8000
 ```
+
+Select **Continue as guest** or **Sign in as Sarah Lee** in the left panel to switch demo context.
 
 **Offline tests** (no API key required)
 ```bash
@@ -68,6 +76,8 @@ pytest -v
 └──────────────────────────────────────────────────────────┘
 ```
 
+The model interprets intent and selects approved tools. Customer authority, policy validation, confirmation and transaction execution remain under application control.
+
 ---
 
 ## Key design decisions
@@ -88,7 +98,7 @@ This keeps the dependency surface minimal and makes the loop transparent.
 
 ### Bounded tool loop (MAX_STEPS = 10)
 
-The agentic loop has a hard ceiling: if the model has not produced a final `end_turn` response after 10 tool calls, the loop exits and returns a safe human-handoff message. This prevents runaway loops from runaway model behaviour.
+The agentic loop has a hard ceiling: if the model has not produced a final `end_turn` response after 10 tool calls, the loop exits and returns a human-handoff message. This bounds execution time and prevents uncontrolled tool loops.
 
 The HTTP retry budget is separate: up to `MAX_HTTP_RETRIES = 2` retries per API call on transient failures (429, 5xx, ConnectionError, Timeout), with 1 s / 2 s exponential backoff. Non-retryable errors (400, 401, 422) raise immediately without retry.
 
@@ -98,37 +108,35 @@ The system prompt instructs Aria to ask for both order ID and email in a single 
 
 ### Guest order matching (order ID + email)
 
-`lookup_order` requires both an order ID and a matching email address. The same generic error message is returned for an unknown order ID and for a known order ID with the wrong email — this prevents enumeration attacks that probe whether a given order ID exists.
+`lookup_order` requires both an order ID and a matching email address. The same generic error is returned whether the order ID is unknown or the email does not match — this prevents callers from probing whether a given order ID exists.
 
-### Authenticated refund authority (server-controlled CustomerContext)
+### Server-controlled CustomerContext
 
-Every tool function accepts a `CustomerContext` that is injected by the orchestration layer, not by the model. The `ctx` fields (`session_id`, `authenticated`, `customer_id`) are absent from all tool schemas sent to the model — the model cannot forge or escalate authority.
+Every tool function accepts a `CustomerContext` injected by the orchestration layer. The `ctx` fields (`session_id`, `authenticated`, `customer_id`) are absent from all tool schemas sent to the model — the model cannot forge or escalate authority.
 
-`prepare_refund` rejects calls when `ctx.authenticated` is False. The `CUSTOMERS` dict maps customer IDs to their order IDs; ownership is checked server-side, not by inspecting what the model passes.
+`prepare_refund` rejects calls when `ctx.authenticated` is False. Order ownership is checked server-side against the `CUSTOMERS` map, not derived from anything the model supplies.
 
-### Application-controlled confirmation (not a model tool)
+### Application-controlled confirmation
 
-In the old design, the model called `record_confirmation` to "prove consent" before a refund. A model-callable tool cannot prove consent — the model can call it without any real customer input.
+Refund preparation and refund execution are deliberately separated. The model can retrieve the order, evaluate eligibility and prepare the proposed refund, but it cannot confirm or execute the transaction.
 
-The new design:
+1. `prepare_refund` validates customer authority, order ownership and refund eligibility.
+2. The application stores a short-lived confirmation token in `PENDING_REFUNDS`.
+3. The customer reviews the refund details and explicitly confirms through the interface.
+4. The application calls `initiate_refund` using the server-held token.
 
-1. Model calls `prepare_refund` → a short-lived confirmation token is stored in `PENDING_REFUNDS`.
-2. Model presents the refund details to the customer and asks them to confirm.
-3. Customer confirms via the `POST /confirm/{session_id}` endpoint.
-4. The **application** (not the model) calls `initiate_refund` with the stored token.
+The token is never exposed to the model or included in its tool schemas. This keeps customer consent and transaction authority under deterministic application control.
 
-The confirmation token is never sent to the model or returned in any tool response. It is application-controlled end-to-end.
+### Idempotent refund execution
 
-### True idempotency (stores result, returns original on retry)
-
-On success, `initiate_refund` stores the full result dict in `REFUNDS_INITIATED[order_id]`. Any subsequent call for the same order returns the original result with `status: "already_initiated"`. This makes retries safe without double-refunding.
+A completed refund stores its result against the order. Repeated requests return the original result rather than executing the transaction again. This protects against duplicate refunds caused by retries or repeated confirmation.
 
 ### Tool and provider error handling
 
-- All tool implementations are wrapped in `try/except`; exceptions return a safe JSON error — no stack traces or internal details are exposed.
+- All tool implementations are wrapped in `try/except`; exceptions return a safe JSON error with no stack traces or internal details.
 - `execute_tool` validates tool names and required fields before dispatch.
-- When `on_tool_call` raises an exception in the client loop, the tool result block is sent with `is_error: true` so the model can handle it gracefully.
-- Errors from the Anthropic API are sanitised before raising — raw response bodies and credentials are never propagated.
+- When a tool call raises in the client loop, the result block is sent back to the model with `is_error: true`.
+- Errors from the Anthropic API are sanitised before raising — raw response bodies are not propagated.
 
 ---
 
@@ -160,23 +168,24 @@ Clients must call `POST /session` before `POST /chat`. Arbitrary client-provided
 ## Tests
 
 ```bash
-pytest -v            # runs unit tests + trajectory evaluations
-pytest test_tools.py # tool layer only (~45 tests)
-pytest evals/        # journey evaluations only
+pytest -v            # all tests
+pytest test_tools.py # tool + endpoint tests
+pytest evals/        # trajectory evaluations
 ```
 
 All tests run offline with no API key. The HTTP layer is mocked via `unittest.mock.patch("requests.post")`.
 
 **Coverage:**
 - Tool business logic (lookup, prepare, initiate, search, escalate)
-- Enumeration prevention (identical errors for unknown vs mismatched)
+- Enumeration prevention (identical errors for unknown order vs email mismatch)
 - Guest/auth authority enforcement
 - Confirmation token lifecycle (missing, expired, wrong session, consumed)
-- True idempotency (returns original result on retry)
-- Client loop: end_turn, tool_use, max_tokens, refusal, unknown stop reason
-- Transient HTTP retry (retried) vs permanent failure (not retried) vs retry limit
+- Idempotent refund execution (returns original result on retry)
+- Client loop: end_turn, tool_use, max_tokens, refusal, iteration limit
+- Transient HTTP retry vs permanent failure vs retry limit
 - Tool error bubbling with `is_error: true`
-- Two full trajectory evaluations with mocked responses
+- FastAPI endpoint behaviour (session creation, auth mode, chat, confirm)
+- Two trajectory evaluations with mocked responses
 
 ---
 
@@ -188,41 +197,38 @@ bookly-agent/
 ├── client.py           # ConversationClient — raw HTTP + agentic loop
 ├── context.py          # CustomerContext dataclass
 ├── tools.py            # Tool schemas (sent to model) + implementations
-├── data.py             # Mock orders, policies, customers, in-memory logs
+├── data.py             # Synthetic orders, policies, customers, in-memory logs
 ├── config.py           # Settings loaded from .env
 ├── server.py           # FastAPI server — /session, /chat, /confirm, static UI
 ├── cli.py              # Interactive REPL
-├── test_tools.py       # ~45 offline unit tests
+├── test_tools.py       # Offline unit + endpoint tests
+├── test_scenarios.py   # Manual demo script
 ├── conftest.py         # pytest path setup + state-reset fixture
 ├── evals/
 │   ├── __init__.py
-│   └── test_journeys.py  # 5 trajectory evaluations
+│   └── test_journeys.py  # Trajectory evaluations
 ├── pyproject.toml      # ruff + pytest config
-├── .github/
-│   └── workflows/
-│       └── ci.yml      # GitHub Actions CI
 ├── requirements.txt
-├── LICENSE
 └── static/
-    └── index.html      # Browser chat UI (dark theme, tool call chips)
+    └── index.html      # Browser chat UI
 ```
 
 ---
 
 ## Prototype limitations
 
-| Limitation | Production requirement |
+| Limitation | Production consideration |
 |---|---|
-| **In-memory sessions** | Conversation history is stored in-memory and lost on restart. Production requires a durable store (database, Redis) |
-| **In-memory data** | ORDERS, REFUNDS_INITIATED, PENDING_REFUNDS are Python dicts. Production requires persistent storage with ACID guarantees |
-| **No real authentication** | The CLI sets `authenticated=True` for demo. Production receives a verified session token from the identity layer |
-| **Single-process** | `_sessions` and `_contexts` dicts are not shared across workers. Production requires a distributed session store |
-| **No token expiry sweep** | Expired PENDING_REFUNDS entries accumulate in memory. Production requires a background sweep or TTL store |
+| **In-memory sessions** | Session history is lost on restart — production requires a durable store |
+| **In-memory data** | `ORDERS`, `REFUNDS_INITIATED`, `PENDING_REFUNDS` are Python dicts — production requires persistent storage with ACID guarantees |
+| **Demo authentication** | `CustomerContext` is set server-side from a mode parameter — production would derive it from a verified session token |
+| **Single-process** | Session dicts are not shared across workers — production requires a distributed session store |
+| **No token expiry sweep** | Expired `PENDING_REFUNDS` entries accumulate in memory — production would use a TTL store or background sweep |
 
 ## Production extension points
 
-- Replace `CustomerContext(authenticated=False)` with a real JWT/session validation step in `create_session`.
-- Replace ORDERS with a database query; replace REFUNDS_INITIATED / PENDING_REFUNDS with transactional DB rows.
+- Replace the demo mode parameter in `create_session` with JWT or session token validation.
+- Replace `ORDERS` with a database query; replace `REFUNDS_INITIATED` and `PENDING_REFUNDS` with transactional DB rows.
 - Add structured logging (token counts, latencies, tool call outcomes) for observability.
-- Add an evaluation pipeline: deterministic tool-call graders + LLM-as-judge scoring on every prompt or model change.
+- Add an evaluation pipeline: deterministic tool-call graders and LLM-as-judge scoring on every prompt or model change.
 - Add circuit-breaker logic around `_post` for graceful degradation under sustained API failures.
