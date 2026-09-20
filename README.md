@@ -1,6 +1,6 @@
 # Bookly AI Concierge
 
-**Aria** is a conversational customer support agent for Bookly, a fictional online bookstore. She handles order tracking, refunds, and policy questions via natural language — in a browser chat UI and a command-line REPL.
+**Aria** is a conversational customer support agent for Bookly, a fictional online bookstore. It handles order tracking, refunds, and policy questions via natural language — in a browser chat UI and a command-line REPL.
 
 > Built with **direct HTTP calls to the Anthropic Messages API** — no SDK, no agent framework.  
 > Every model interaction is a raw `requests.post()` to `api.anthropic.com/v1/messages`.
