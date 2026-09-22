@@ -13,6 +13,51 @@ Two journeys are supported: a guest customer tracking an order by ID and email, 
 
 ---
 
+### Request and action flow
+
+```mermaid
+sequenceDiagram
+    participant Customer
+    participant UI as Bookly Chat UI
+    participant Agent as Bookly AI Agent
+    participant Model as Anthropic API
+    participant Tools as Scoped Tools and State
+
+    Customer->>UI: Send message
+    UI->>Agent: POST /chat with message and session ID
+    Agent->>Agent: Load customer context, instructions, history and permitted tools
+    Agent->>Model: Send message, history and tool definitions
+
+    alt Answer or clarification
+        Model-->>Agent: end_turn with response
+    else Tool required
+        Model-->>Agent: tool_use
+
+        loop Until resolved, maximum 10 tool rounds
+            Agent->>Tools: Validate and execute tool with customer context
+            Tools-->>Agent: Return customer scoped result
+            Agent->>Model: Append tool result and continue
+            Model-->>Agent: tool_use or end_turn
+        end
+    end
+
+    Agent-->>UI: Safe response and pending action summary
+    UI-->>Customer: Display response
+
+    opt Signed in customer confirms refund
+        Customer->>UI: Select Confirm refund
+        UI->>Agent: POST /confirm/{session_id}
+        Agent->>Tools: Retrieve server held token and call initiate_refund
+        Tools->>Tools: Validate identity, ownership, session, order and expiry
+        Tools->>Tools: Prevent duplicate refund execution
+        Tools-->>Agent: Return refund result
+        Agent-->>UI: Return safe confirmation
+        UI-->>Customer: Display refund confirmation
+    end
+```
+
+The model can answer, clarify or request an available tool. Bookly injects customer context and validates every tool call. Refund execution follows a separate application controlled path and is never exposed to the model as a tool.
+
 ## Quick start
 
 **CLI**
